@@ -135,7 +135,18 @@ def _get_chunk_multiplier(vocab_size, target_gb = None):
     """ Gets chunk size that fits the target max memory usage (1GB) """
     if target_gb is None:
         # Find current VRAM left in the GPU, and use 50% or less of it
-        free, total = torch.xpu.mem_get_info(0) if DEVICE_TYPE == "xpu" else torch.cuda.mem_get_info(0)
+        if DEVICE_TYPE == "xpu":
+            free, total = torch.xpu.mem_get_info(0)
+        elif DEVICE_TYPE == "cuda":
+            free, total = torch.cuda.mem_get_info(0)
+        elif DEVICE_TYPE == "mps":
+            # MPS unified memory - hard to get "free" accurately
+            # We'll use a conservative fallback or let the user specify via UNSLOTH_CE_LOSS_TARGET_GB
+            # For now, default to 2GB target if not specified
+            free = 4 * 1024 * 1024 * 1024
+        else:
+            free = 0
+        pass
         free_gb = free / 1024 / 1024 / 1024
         free_gb = free_gb * 0.5
         target_gb = free_gb

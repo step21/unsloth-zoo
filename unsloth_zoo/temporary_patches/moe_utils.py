@@ -15,6 +15,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import torch
 import torch.nn.functional as F
+from ..device_type import DEVICE_TYPE
 import os
 import shutil
 import sys
@@ -248,6 +249,10 @@ def select_moe_backend():
     Default if unspecified: "grouped_mm".
     """
     # This Unsloth Zoo code section is licensed under AGPL3
+
+    # For MPS, only native_torch is currently supported reliably without custom kernels
+    if DEVICE_TYPE == "mps":
+        return "native_torch"
 
     requested = os.environ.get("UNSLOTH_MOE_BACKEND")
     if requested:

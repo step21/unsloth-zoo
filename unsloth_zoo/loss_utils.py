@@ -20,8 +20,13 @@ import os
 import math
 import functools
 from typing import Optional
+import contextlib
 torch_nn_functional_cross_entropy = torch.nn.functional.cross_entropy
-from triton import __version__ as triton_version
+try:
+    from triton import __version__ as triton_version
+except ImportError:
+    triton_version = "0.0.0"
+pass
 from . import DEVICE_TYPE
 from .temporary_patches.common import UNSLOTH_ENABLE_LOGGING, torch_compile_options, logger
 import inspect
@@ -174,7 +179,16 @@ def post_patch_loss_function(model):
 pass
 
 
-current_device = torch.xpu.device if DEVICE_TYPE == "xpu" else torch.cuda.device
+if DEVICE_TYPE == "xpu":
+    current_device = torch.xpu.device
+elif DEVICE_TYPE == "cuda":
+    current_device = torch.cuda.device
+elif DEVICE_TYPE == "mps":
+    # MPS context manager support can vary, use a dummy if not present
+    current_device = getattr(torch, "mps", None)
+    current_device = getattr(current_device, "device", contextlib.nullcontext) if current_device else contextlib.nullcontext
+else:
+    current_device = contextlib.nullcontext
 def fused_linear_cross_entropy(
     hidden_states      : torch.Tensor,
     lm_weight          : torch.Tensor,

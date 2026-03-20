@@ -30,6 +30,7 @@ __all__ = [
 from .compiler import UNSLOTH_COMPILE_LOCATION
 from .utils import _get_dtype, Version
 from .hf_utils import dtype_from_config, set_dtype_in_config, HAS_TORCH_DTYPE
+from .device_type import DEVICE_TYPE, clean_gpu_cache
 
 # Also disable compiling on bitsandbytes
 def patch_compiling_bitsandbytes():
@@ -160,16 +161,14 @@ def patch_torch_compile(debug = False, O3 = False, ignore_errors = True):
         # "config.combo_kernel_foreach_dynamic_shapes = True",
         "config.freezing = False", # Freezes weights --> ** only useful for inference **
         # f"config.triton.multi_kernel = {O3}", # use tuning to pick between different subkernels
-        "config.cuda.enable_cuda_lto = True",
-        "config.cuda.use_fast_math = True",
-        f"config.cuda.compile_opt_level = {'-O2' if O3 else '-O1'}",
-        # See torch.compile, the missing manual
-        # https://docs.google.com/document/d/1y5CRfMLdwEoF1nTk9q8qEu1mgMUuUtvhklPKJ2emLU8
-        # f"config.emulate_precision_casts = {not debug}", # Force X.to(f32).to(f16) instead of X.to(f16)
-        # when setting to not debug aka True, we get errors on torch2.6
-        # TypeError: ValueRangeAnalysis.to_dtype() got an unexpected keyword argument 'use_compute_types'
-        # this keyword exists in torch2.7.0 but not in torch2.6.0 so set to False until torch2.6.0 is deprecated.
     ]
+    if DEVICE_TYPE == "cuda":
+        torch_compile_arguments += [
+            "config.cuda.enable_cuda_lto = True",
+            "config.cuda.use_fast_math = True",
+            f"config.cuda.compile_opt_level = {'-O2' if O3 else '-O1'}",
+        ]
+    pass
     # Torch dynamo arguments
     torch_dynamo_arguments = [
         "config.accumulated_cache_size_limit = 1024", # Bump up a bit from 256
@@ -342,7 +341,7 @@ def patch_model_and_tokenizer(
                 module.to(setted_dtype)
             if "bias" in name:
                 module.to(setted_dtype)
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
 
         # Convert any remaining bfloat16 parameters
         for name, param in model.named_parameters():
@@ -521,7 +520,7 @@ def patch_model_and_tokenizer(
     # Clear deleted GPU items
     for _ in range(3):
         gc.collect()
-        torch.cuda.empty_cache()
+        clean_gpu_cache()
     return model, tokenizer
 pass
 

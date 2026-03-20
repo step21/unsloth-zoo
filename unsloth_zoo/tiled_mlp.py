@@ -226,7 +226,16 @@ def patch_mlp(mlp_module, target_arctic = True, target_gb = None, padded_length 
             intermediate_size = hd * 4
 
         if target_gb is None:
-            free, total = torch.cuda.mem_get_info(0)
+            if DEVICE_TYPE == "xpu":
+                free, total = torch.xpu.mem_get_info(0)
+            elif DEVICE_TYPE == "cuda":
+                free, total = torch.cuda.mem_get_info(0)
+            elif DEVICE_TYPE == "mps":
+                # Fallback for MPS
+                free = 4 * 1024 * 1024 * 1024
+            else:
+                free = 0
+            pass
             free_gb = free / 1024 / 1024 / 1024
             free_gb = free_gb * 0.5
             target_gb = free_gb

@@ -28,6 +28,7 @@ from .device_type import (
     DEVICE_TYPE_TORCH,
     DEVICE_COUNT,
     ALLOW_PREQUANTIZED_MODELS,
+    clean_gpu_cache,
 )
 
 __all__ = [
@@ -58,8 +59,8 @@ if Version(torch_version) < Version("2.4.0"):
     torch_amp_custom_fwd = torch.cuda.amp.custom_fwd
     torch_amp_custom_bwd = torch.cuda.amp.custom_bwd
 else:
-    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = "cuda")
-    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = "cuda")
+    torch_amp_custom_fwd = torch.amp.custom_fwd(device_type = DEVICE_TYPE_TORCH)
+    torch_amp_custom_bwd = torch.amp.custom_bwd(device_type = DEVICE_TYPE_TORCH)
 pass
 
 
@@ -313,6 +314,8 @@ if DEVICE_TYPE in ("cuda", "hip"):
     torch_gpu_stream = torch.cuda.stream
 elif DEVICE_TYPE == "xpu":
     torch_gpu_stream = torch.xpu.stream
+elif DEVICE_TYPE == "mps":
+    torch_gpu_stream = torch.mps.stream if hasattr(torch, "mps") and hasattr(torch.mps, "stream") else contextlib.nullcontext
 
 CPU_BUFFERS = []
 CPU_INDEX = None
@@ -341,32 +344,52 @@ def initialize_unsloth_gradient_checkpointing(dtype = None):
             SUPPORTS_BFLOAT16 = True
         elif DEVICE_TYPE == "xpu":
             SUPPORTS_BFLOAT16 = True
+        elif DEVICE_TYPE == "mps":
+            SUPPORTS_BFLOAT16 = True
         dtype = torch.bfloat16 if SUPPORTS_BFLOAT16 else torch.float16
     pass
 
     for i in range(200):
-        x = torch.empty(128*1024, dtype = dtype, device = "cpu", pin_memory = True)
+        # MPS does not support pin_memory=True in the same way
+        x = torch.empty(128*1024, dtype = dtype, device = "cpu", pin_memory = (DEVICE_TYPE != "mps"))
         CPU_BUFFERS.append(x)
     pass
 
     # Allocate buffers to how many GPUs
-    n_gpus = torch.cuda.device_count() if DEVICE_TYPE in ("cuda", "hip") else torch.xpu.device_count()
+    if DEVICE_TYPE in ("cuda", "hip"):
+        n_gpus = torch.cuda.device_count()
+    elif DEVICE_TYPE == "xpu":
+        n_gpus = torch.xpu.device_count()
+    elif DEVICE_TYPE == "mps":
+        n_gpus = 1
+    else:
+        n_gpus = 0
+    pass
+
     try:
         GPU_BUFFERS = tuple([torch.empty(2*256*2048, dtype = dtype, device = f"{DEVICE_TYPE_TORCH}:{i}") for i in range(n_gpus)])
     except Exception as e:
         print("="*10 + "\n")
-        print("Unsloth: Your setup does not support `PYTORCH_CUDA_ALLOC_CONF`\n")
-        print("Please set `import os; os.environ['PYTORCH_CUDA_ALLOC_CONF'] = '';`\n")
+        print(f"Unsloth: Your setup does not support PYTORCH_{DEVICE_TYPE.upper()}_ALLOC_CONF\n")
+        print(f"Please set `import os; os.environ['PYTORCH_{DEVICE_TYPE.upper()}_ALLOC_CONF'] = '';`\n")
         print("Then re-run Unsloth from the start.")
         print("="*10 + "\n")
         raise
 
     BACKWARD_PASS = True
-    EXTRA_STREAMS = tuple([torch.cuda.Stream() if DEVICE_TYPE_TORCH == "cuda" else torch.xpu.Stream() for i in range(n_gpus)])
-    if DEVICE_TYPE in ("cuda", "hip"):
+    if DEVICE_TYPE_TORCH == "cuda":
+        EXTRA_STREAMS = tuple([torch.cuda.Stream() for i in range(n_gpus)])
         MAIN_STREAMS  = tuple([torch.cuda.default_stream(torch.device(f"cuda:{i}")) for i in range(n_gpus)])
-    elif DEVICE_TYPE == "xpu":
+    elif DEVICE_TYPE_TORCH == "xpu":
+        EXTRA_STREAMS = tuple([torch.xpu.Stream() for i in range(n_gpus)])
         MAIN_STREAMS  = tuple([torch.xpu.current_stream(torch.device(f"xpu:{i}")) for i in range(n_gpus)])
+    elif DEVICE_TYPE_TORCH == "mps":
+        if hasattr(torch, "mps") and hasattr(torch.mps, "Stream"):
+            EXTRA_STREAMS = tuple([torch.mps.Stream() for i in range(n_gpus)])
+            MAIN_STREAMS  = tuple([torch.mps.current_stream() for i in range(n_gpus)])
+        else:
+            EXTRA_STREAMS = tuple([None for i in range(n_gpus)])
+            MAIN_STREAMS  = tuple([None for i in range(n_gpus)])
 
     # Minimum size to enable Unsloth GC is 2MB -> 32 layers = 64MB
     n_bytes = torch.finfo(dtype).bits // 8
@@ -467,8 +490,11 @@ class UnslothCheckpointFunction(torch.autograd.Function):
                         x = x[:new_size].view(shape)
 
                         # See https://pytorch.org/docs/stable/notes/cuda.html#cuda-streams
-                        EXTRA_STREAM.wait_stream(MAIN_STREAM)
-                        with torch_gpu_stream(EXTRA_STREAM):
+                        if EXTRA_STREAM is not None and MAIN_STREAM is not None:
+                            EXTRA_STREAM.wait_stream(MAIN_STREAM)
+                            with torch_gpu_stream(EXTRA_STREAM):
+                                x.copy_(arg, non_blocking = True)
+                        else:
                             x.copy_(arg, non_blocking = True)
 
                         ctx._saved_metadata = (new_size, shape, CPU_INDEX, device_index, MAIN_STREAM, EXTRA_STREAM,)
@@ -497,7 +523,8 @@ class UnslothCheckpointFunction(torch.autograd.Function):
         with torch.no_grad():
             outputs = run_function(*args)
 
-        if use_gpu_buffer: MAIN_STREAM.wait_stream(EXTRA_STREAM)
+        if use_gpu_buffer and MAIN_STREAM is not None and EXTRA_STREAM is not None:
+            MAIN_STREAM.wait_stream(EXTRA_STREAM)
         return outputs
     pass
 
@@ -527,8 +554,11 @@ class UnslothCheckpointFunction(torch.autograd.Function):
             x = CPU_BUFFERS[CPU_INDEX][:new_size].view(shape)
 
             # See https://pytorch.org/docs/stable/notes/cuda.html#cuda-streams
-            EXTRA_STREAM.wait_stream(MAIN_STREAM)
-            with torch_gpu_stream(EXTRA_STREAM):
+            if EXTRA_STREAM is not None and MAIN_STREAM is not None:
+                EXTRA_STREAM.wait_stream(MAIN_STREAM)
+                with torch_gpu_stream(EXTRA_STREAM):
+                    buffer.copy_(x, non_blocking = True)
+            else:
                 buffer.copy_(x, non_blocking = True)
         else:
             # No GPU buffer seen
@@ -579,7 +609,8 @@ class UnslothCheckpointFunction(torch.autograd.Function):
 
             # Wait for GPU buffer to finish
             if CPU_INDEX is not None:
-                MAIN_STREAM.wait_stream(EXTRA_STREAM)
+                if MAIN_STREAM is not None and EXTRA_STREAM is not None:
+                    MAIN_STREAM.wait_stream(EXTRA_STREAM)
                 x = buffer.detach()
                 x.requires_grad_(True)
                 detached_inputs[0] = x
@@ -827,7 +858,7 @@ def unpatch_unsloth_smart_gradient_checkpointing():
             if type(GPU_BUFFERS) is list: GPU_BUFFERS[i] = None
         CPU_BUFFERS = None
         GPU_BUFFERS = None
-        torch.cuda.empty_cache()
+        clean_gpu_cache()
         gc.collect()
 
     if (torch.utils.checkpoint.checkpoint.__name__ == "unsloth_checkpoint") and \
@@ -915,7 +946,7 @@ def reset_unsloth_gradient_checkpointing_buffers():
     USE_UNSLOTH_GC = True  # Re-enable the "Will smartly offload" message
 
     # Clean up freed memory
-    torch.cuda.empty_cache()
+    clean_gpu_cache()
     gc.collect()
 pass
 

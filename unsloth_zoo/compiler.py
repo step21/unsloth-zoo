@@ -47,7 +47,10 @@ from .utils import (
     get_lock,
 )
 from .log import logger
-import triton
+try:
+    import triton
+except ImportError:
+    triton = None
 import regex
 from .peft_utils import get_lora_layer_modules
 from importlib.metadata import version as importlib_version
@@ -86,13 +89,15 @@ minor = None
 if DEVICE_TYPE == "cuda":
     major, minor = torch.cuda.get_device_capability()
     OLD_CUDA_ARCH_VERSION = (major <= 7) and (minor < 5)
-elif DEVICE_TYPE == "hip":
-    OLD_CUDA_ARCH_VERSION = False
-elif DEVICE_TYPE == "xpu":
+elif DEVICE_TYPE in ("hip", "xpu", "mps"):
     OLD_CUDA_ARCH_VERSION = False
 pass
 
-OLD_TRITON_VERSION = Version(triton.__version__) < Version("3.0.0")
+if triton is not None:
+    OLD_TRITON_VERSION = Version(triton.__version__) < Version("3.0.0")
+else:
+    OLD_TRITON_VERSION = True
+pass
 
 # Check if Unsloth Studio is allowed
 import importlib.util

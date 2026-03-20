@@ -21,6 +21,7 @@ __all__ = [
     "ALLOW_PREQUANTIZED_MODELS",
     "ALLOW_BITSANDBYTES",
     "device_synchronize",
+    "clean_gpu_cache",
 ]
 
 import torch
@@ -209,6 +210,8 @@ def get_device_type():
         return "cuda"
     elif hasattr(torch, "xpu") and torch.xpu.is_available():
         return "xpu"
+    elif hasattr(torch, "mps") and torch.backends.mps.is_available():
+        return "mps"
     # Check torch.accelerator
     if hasattr(torch, "accelerator"):
         if not torch.accelerator.is_available():
@@ -217,6 +220,8 @@ def get_device_type():
                 raise NotImplementedError(amd_hint)
             raise NotImplementedError("Unsloth cannot find any torch accelerator? You need a GPU.")
         accelerator = str(torch.accelerator.current_accelerator())
+        if accelerator == "mps":
+            return "mps"
         if accelerator in ("cuda", "xpu", "hip"):
             raise RuntimeError(
                 f"Unsloth: Weirdly `torch.cuda.is_available()`, `torch.xpu.is_available()` and `is_hip` all failed.\n"\
@@ -226,7 +231,7 @@ def get_device_type():
     amd_hint = _amd_installation_hint()
     if amd_hint is not None:
         raise NotImplementedError(amd_hint)
-    raise NotImplementedError("Unsloth currently only works on NVIDIA, AMD and Intel GPUs.")
+    raise NotImplementedError("Unsloth currently only works on NVIDIA, AMD, Intel and Apple GPUs.")
 pass
 DEVICE_TYPE : str = get_device_type()
 # HIP fails for autocast and other torch functions. Use CUDA instead
@@ -239,6 +244,8 @@ def get_device_count():
         return torch.cuda.device_count()
     elif DEVICE_TYPE == "xpu":
         return torch.xpu.device_count()
+    elif DEVICE_TYPE == "mps":
+        return 1
     else:
         return 1
 pass
@@ -263,7 +270,7 @@ pass
 
 def device_synchronize():
     """
-    Synchronize the current device (CUDA, XPU, or HIP).
+    Synchronize the current device (CUDA, XPU, HIP or MPS).
     This is a cross-platform replacement for torch.cuda.synchronize().
     """
     if DEVICE_TYPE in ("cuda", "hip"):
@@ -272,4 +279,23 @@ def device_synchronize():
     elif DEVICE_TYPE == "xpu":
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             torch.xpu.synchronize()
+    elif DEVICE_TYPE == "mps":
+        if hasattr(torch, "mps") and torch.backends.mps.is_available():
+            torch.mps.synchronize()
+pass
+
+def clean_gpu_cache():
+    """
+    Empty the current device's cache (CUDA, XPU, HIP or MPS).
+    This is a cross-platform replacement for torch.cuda.empty_cache().
+    """
+    if DEVICE_TYPE in ("cuda", "hip"):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    elif DEVICE_TYPE == "xpu":
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.empty_cache()
+    elif DEVICE_TYPE == "mps":
+        if hasattr(torch, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
 pass
