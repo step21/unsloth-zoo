@@ -30,6 +30,8 @@ import sys
 import logging
 from ..log import logger
 import functools
+from ..device_type import DEVICE_TYPE
+
 UNSLOTH_ENABLE_LOGGING  = os.environ.get("UNSLOTH_ENABLE_LOGGING",  "0") == "1"
 UNSLOTH_COMPILE_DISABLE = os.environ.get("UNSLOTH_COMPILE_DISABLE", "0") == "1"
 
@@ -115,6 +117,9 @@ def get_torch_compile_options(
     }
     final_torch_compile_options = {}
     for key, value in torch_compile_options.items():
+        if DEVICE_TYPE == "mps" and ("cuda" in key or "triton" in key):
+            continue
+        
         splits = key.split(".")
         if all(k in inductor_config_source for k in splits):
             final_torch_compile_options[key] = value

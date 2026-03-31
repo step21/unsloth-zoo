@@ -101,6 +101,12 @@ def get_target_device(index = 0):
 def get_mem_info():
     if DEVICE_TYPE == "xpu":
         free_memory, total_memory = torch.xpu.mem_get_info()
+    elif DEVICE_TYPE == "mps":
+        # MPS doesn't have a direct equivalent. Return dummy or estimated values.
+        # Assuming 16GB total, 8GB free as a placeholder if we can't get it.
+        # Or use psutil for system memory as a proxy?
+        total_memory = psutil.virtual_memory().total
+        free_memory = psutil.virtual_memory().available
     else:
         free_memory, total_memory = torch.cuda.mem_get_info()
     return free_memory, total_memory

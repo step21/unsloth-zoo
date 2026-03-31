@@ -1136,6 +1136,10 @@ from ..device_type import DEVICE_TYPE
 
 if DEVICE_TYPE == "xpu":
     device_memory = torch.xpu.memory.mem_get_info(0)[-1]
+elif DEVICE_TYPE == "mps":
+    # MPS does not have a direct equivalent for mem_get_info easily, 
+    # but we can set a default or use total memory if needed.
+    device_memory = 8 * 1024 * 1024 * 1024 # Default to 8GB for now
 else:
     device_memory = torch.cuda.memory.mem_get_info(0)[-1]
 use_combo_kernels = False if device_memory/1024/1024/1024 <= 40 else True

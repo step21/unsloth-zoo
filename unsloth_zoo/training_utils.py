@@ -26,6 +26,7 @@ import time
 from typing import Any, Optional, List, Dict, Tuple
 from .utils import _get_dtype, Version
 from .hf_utils import dtype_from_config
+from .device_type import DEVICE_TYPE
 from .gradient_checkpointing import (
     unpatch_unsloth_gradient_checkpointing,
     unpatch_unsloth_smart_gradient_checkpointing,
@@ -395,7 +396,20 @@ def unsloth_train(trainer):
     # Mixed precision scaling
     torch_version = torch.__version__
     config_dtype = dtype_from_config(model.config)
-    if config_dtype == torch.float16:
+    
+    if DEVICE_TYPE == "mps":
+        # MPS mixed precision handling
+        mixed_precision = "fp16" if config_dtype == torch.float16 else "bf16"
+        mixed_dtype = config_dtype
+        # MPS doesn't always support GradScaler the same way, but let's try generic
+        if Version(torch_version) >= Version("2.4.0"):
+             try:
+                 float16_scaler = torch.amp.GradScaler("mps")
+             except:
+                 float16_scaler = None
+        else:
+             float16_scaler = None
+    elif config_dtype == torch.float16:
         mixed_precision = "fp16"
         mixed_dtype = torch.float16
         # torch.cuda.amp.autocast is deprecated >= 2.4
@@ -413,7 +427,18 @@ def unsloth_train(trainer):
 
     # torch.cuda.amp.autocast is deprecated >= 2.4
     torch_version = torch.__version__
-    if Version(torch_version) < Version("2.4.0"):
+    if DEVICE_TYPE == "mps":
+        if Version(torch_version) >= Version("2.4.0"):
+            autocast_context_manager = torch.amp.autocast(
+                device_type = "mps",
+                dtype = mixed_dtype,
+                cache_enabled = False,
+            )
+        else:
+            # Fallback or no-op context for older torch on MPS
+            from contextlib import nullcontext
+            autocast_context_manager = nullcontext()
+    elif Version(torch_version) < Version("2.4.0"):
         autocast_context_manager = torch.cuda.amp.autocast(
             dtype = mixed_dtype,
             cache_enabled = False,
@@ -427,7 +452,7 @@ def unsloth_train(trainer):
     pass
 
     step = 0
-    accumulated_loss = torch.zeros(1, device = "cuda:0", dtype = torch.float32)[0]
+    accumulated_loss = torch.zeros(1, device = f"{DEVICE_TYPE}:0" if DEVICE_TYPE == "cuda" else DEVICE_TYPE, dtype = torch.float32)[0]
     debug_info = \
         f'==((====))==  Unsloth - 2x faster free finetuning | Num GPUs = {training_args.world_size}\n'\
         f'    \\   /|    Num examples = {n_training_samples:,} | Num Epochs = {num_train_epochs:,}\n'\
@@ -473,8 +498,9 @@ def unsloth_train(trainer):
 
                 # Gradient accumulation
                 for batch in batches:
-                    input_ids = batch["input_ids"].pin_memory().to(device = "cuda:0", non_blocking = True)
-                    labels    = batch["labels"]   .pin_memory().to(device = "cuda:0", non_blocking = True)
+                    device = f"{DEVICE_TYPE}:0" if DEVICE_TYPE == "cuda" else DEVICE_TYPE
+                    input_ids = batch["input_ids"].pin_memory().to(device = device, non_blocking = True)
+                    labels    = batch["labels"]   .pin_memory().to(device = device, non_blocking = True)
 
                     with autocast_context_manager:
                         loss = model(input_ids = input_ids, labels = labels, n_items = n_items).loss

@@ -34,7 +34,7 @@ import inspect
 global HAS_CUT_CROSS_ENTROPY
 global UNSLOTH_STUDIO_ENABLED
 import importlib.util
-if importlib.util.find_spec("unsloth_studio") is None:
+if importlib.util.find_spec("unsloth_studio.losses") is None:
     UNSLOTH_STUDIO_ENABLED = False
 else:
     UNSLOTH_STUDIO_ENABLED = os.environ.get("UNSLOTH_STUDIO_DISABLED", "0") == "0"

@@ -20,6 +20,7 @@ import numpy as np
 import itertools
 import datasets
 import re
+from .device_type import clean_gpu_cache
 
 __all__ = [
     "mean_of_trained_tokens",
@@ -194,7 +195,7 @@ def add_new_tokens(
     # Clear deleted GPU items
     for _ in range(3):
         gc.collect()
-        torch.cuda.empty_cache()
+        clean_gpu_cache()
     return
 pass
 
@@ -452,7 +453,7 @@ def fix_untrained_tokens(model, tokenizer, train_dataset, IGNORED_TOKENIZER_NAME
     # Clean up
     for _ in range(3):
         gc.collect()
-        torch.cuda.empty_cache()
+        clean_gpu_cache()
     pass
     return
 pass

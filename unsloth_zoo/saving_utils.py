@@ -23,6 +23,7 @@ import warnings
 from .peft_utils import get_lora_layer_modules
 from .utils import _get_dtype
 from .hf_utils import dtype_from_config
+from .device_type import DEVICE_TYPE, clean_gpu_cache, device_synchronize
 from .temporary_patches.common import UNSLOTH_ENABLE_LOGGING, logger
 from collections import defaultdict
 
@@ -61,7 +62,10 @@ This {model_type} model was trained 2x faster with [Unsloth](https://github.com/
 """
 
 import torch
-import bitsandbytes as bnb
+try:
+    import bitsandbytes as bnb
+except ImportError:
+    bnb = None
 try:
     from huggingface_hub import get_token
 except:
@@ -158,9 +162,10 @@ import os, shutil, re, functools
 
 def _merge_lora(W, lora_stats, name):
     if lora_stats.lora_A is None or lora_stats.lora_B is None: return W
-    W = W.to("cuda", dtype = torch.float32, non_blocking = True)
-    lora_B = lora_stats.lora_B.to("cuda", dtype = torch.float32, non_blocking = True)
-    lora_A = lora_stats.lora_A.to("cuda", dtype = torch.float32, non_blocking = True)
+    device = f"{DEVICE_TYPE}:0" if DEVICE_TYPE == "cuda" else DEVICE_TYPE
+    W = W.to(device, dtype = torch.float32, non_blocking = True)
+    lora_B = lora_stats.lora_B.to(device, dtype = torch.float32, non_blocking = True)
+    lora_A = lora_stats.lora_A.to(device, dtype = torch.float32, non_blocking = True)
     # Handle vocab resize: LoRA may have more rows than base safetensors weight
     if lora_B.shape[0] != W.shape[0]:
         new_size = lora_B.shape[0]
@@ -203,16 +208,18 @@ def check_if_quantized(module: torch.nn.Module) -> bool:
     if not hasattr(module, "weight"): return False
 
     if hasattr(module, "W_q"):  # For handling HQQ quantized weight
-        # weight = module.dequantize()
-        # return weight
         return True
-    elif type(module.weight).__module__.startswith("torchao."):
-        # check for torchao without requiring any torchao imports
-        # weight = module.weight.dequantize()
-        # return weight
-        return True
-
-    weight = module.weight
+    
+    # Check for torchao
+    if hasattr(module, "weight"):
+        weight = module.weight
+        if type(weight).__module__.startswith("torchao."):
+            return True
+        # Some torchao layers might be wrapped or have specific attributes
+        if hasattr(weight, "dequantize") and "torchao" in str(type(weight)):
+            return True
+    
+    weight = getattr(module, "weight", None)
     if not isinstance(weight, torch.nn.Parameter):
         if isinstance(weight, torch.Tensor):
             # this is an FSDP-specific edge case
@@ -615,9 +622,8 @@ def _merge_and_overwrite_lora(
                     logger.info(f"[merge_debug] First shard key example: {key}")
 
                 # FORCE memory cleanup before processing each tensor
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
+                clean_gpu_cache()
+                device_synchronize()
 
                 # ---------- Special handling for MoE stacked expert params ----------
                 # gate_up_proj is stored fused in the model but sharded as gate_proj & up_proj per expert on disk.
@@ -759,7 +765,7 @@ def _merge_and_overwrite_lora(
                     )
 
                 del W
-                torch.cuda.empty_cache()
+                clean_gpu_cache()
             pass
             # Success! Direct overwrite completed
         pass
@@ -782,8 +788,7 @@ def _merge_and_overwrite_lora(
             save_file(tensors, filename_original)
             del tensors
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        clean_gpu_cache()
         return count, safetensor_keys_seen
 
     except Exception as e:
@@ -836,7 +841,11 @@ def _merge_moe_gate_expert(gate_W, lora_stats, expert_idx, num_experts, output_d
         # gate_proj corresponds to first half of A
         gate_a = a_slice[:, :inter_dim]                    # (r, I)
 
-        device = gate_W.device if gate_W.is_cuda else ("cuda" if torch.cuda.is_available() else "cpu")
+        if gate_W.is_cuda: device = gate_W.device
+        elif DEVICE_TYPE == "cuda": device = "cuda"
+        elif DEVICE_TYPE == "mps": device = "mps"
+        else: device = "cpu"
+        
         gate_delta = b_slice.to(device, dtype = torch.float32, non_blocking = True) @ gate_a.to(device, dtype = torch.float32, non_blocking = True)
 
         gate_merged = gate_W.to(device, dtype = torch.float32, non_blocking = True)
@@ -879,7 +888,11 @@ def _merge_moe_up_expert(up_W, lora_stats, expert_idx, num_experts, output_dtype
         # up_proj corresponds to second half of A
         up_a   = a_slice[:, inter_dim:]                    # (r, I)
 
-        device = up_W.device if up_W.is_cuda else ("cuda" if torch.cuda.is_available() else "cpu")
+        if up_W.is_cuda: device = up_W.device
+        elif DEVICE_TYPE == "cuda": device = "cuda"
+        elif DEVICE_TYPE == "mps": device = "mps"
+        else: device = "cpu"
+
         up_delta   = b_slice.to(device, dtype = torch.float32, non_blocking = True) @ up_a.to(device, dtype = torch.float32, non_blocking = True)
 
         up_merged = up_W.to(device, dtype = torch.float32, non_blocking = True)
@@ -920,7 +933,11 @@ def _merge_moe_down_proj_expert(down_W, lora_stats, expert_idx, num_experts, out
         a_slice = lora_stats.lora_A[start:end, :]     # (r, H_out)
         b_slice = lora_stats.lora_B[:, start:end]     # (I_in, r)
 
-        device = down_W.device if down_W.is_cuda else ("cuda" if torch.cuda.is_available() else "cpu")
+        if down_W.is_cuda: device = down_W.device
+        elif DEVICE_TYPE == "cuda": device = "cuda"
+        elif DEVICE_TYPE == "mps": device = "mps"
+        else: device = "cpu"
+
         delta = b_slice.to(device, dtype = torch.float32, non_blocking = True) @ a_slice.to(device, dtype = torch.float32, non_blocking = True)
         merged = down_W.to(device, dtype = torch.float32, non_blocking = True)
         merged = merged.add(delta.transpose(0, 1), alpha = lora_stats.alpha)
@@ -1192,11 +1209,11 @@ def _merge_moe_fused_gate_up_expert(gate_up_W, lora_stats, output_dtype):
         if total_rank % num_experts != 0:
             return gate_up_W
 
-        device = (
-            gate_up_W.device
-            if gate_up_W.is_cuda
-            else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        if gate_up_W.is_cuda: device = gate_up_W.device
+        elif DEVICE_TYPE == "cuda": device = "cuda"
+        elif DEVICE_TYPE == "mps": device = "mps"
+        else: device = "cpu"
+        
         gate_up_merged = gate_up_W.to(device, dtype=torch.float32, non_blocking=True)
 
         # Merge LoRA for each expert
@@ -1250,11 +1267,11 @@ def _merge_moe_fused_down_proj_expert(down_W, lora_stats, output_dtype):
         if total_rank % num_experts != 0:
             return down_W
 
-        device = (
-            down_W.device
-            if down_W.is_cuda
-            else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        if down_W.is_cuda: device = down_W.device
+        elif DEVICE_TYPE == "cuda": device = "cuda"
+        elif DEVICE_TYPE == "mps": device = "mps"
+        else: device = "cpu"
+        
         down_merged = down_W.to(device, dtype=torch.float32, non_blocking=True)
 
         # Merge LoRA for each expert
@@ -1343,8 +1360,13 @@ def _merge_and_overwrite_lora_mxfp4(save_directory, filename, lora_weights, outp
                 blocks_tensor, scales_tensor = file.get_tensor(key), file.get_tensor(scales_key)
 
                 if torch.cuda.is_available():
-                    torch.cuda.synchronize()  # Wait for previous operations to complete
-                    torch.cuda.empty_cache()
+                    # Keep CUDA-specific sync/empty for actual CUDA devices if needed,
+                    # but we generally prefer clean_gpu_cache/device_synchronize
+                    device_synchronize()
+                    clean_gpu_cache()
+                elif DEVICE_TYPE == "mps":
+                     device_synchronize()
+                     clean_gpu_cache()
 
                 # Determine optimal device and chunk size for mxfp4 dequantization
                 device_type, device_id, rows_per_chunk = _choose_mxfp4_processing_strategy(
@@ -1426,7 +1448,7 @@ def _merge_and_overwrite_lora_mxfp4(save_directory, filename, lora_weights, outp
             tensors[output_key] = W
 
             # Free up VRAM after each merge
-            torch.cuda.empty_cache()
+            clean_gpu_cache()
 
     # CRITICAL: Force cleanup to release file handles on Windows
     if os.name == 'nt':
@@ -1959,7 +1981,11 @@ def merge_and_overwrite_lora(
 
     # Step 3: Conditional index handling
     import subprocess
-    is_t4 = "Tesla T4" in str(torch.cuda.get_device_name(0))
+    if DEVICE_TYPE == "cuda" and torch.cuda.is_available():
+        is_t4 = "Tesla T4" in str(torch.cuda.get_device_name(0))
+    else:
+        is_t4 = False
+    
     needs_splitting = should_split_shards(is_t4, config, safetensors_list) if save_method == "merged_16bit" else False
     _hf_cache_dir = _get_hf_cache_dir()
     copied_all_from_cache = False
@@ -2485,7 +2511,20 @@ def merge_and_dequantize_lora(
         x = state_dict[name]
         if type(x) is LoraStats:
             DEQUANTIZED_KEYS.append(name)
-            W = dequantize_module_weight(x.module)
+            
+            # Use PEFT's dequantize_module_weight
+            try:
+                W = dequantize_module_weight(x.module)
+            except Exception:
+                # Manual dequantization fallback for torchao
+                if hasattr(x.module, "weight") and hasattr(x.module.weight, "dequantize"):
+                    W = x.module.weight.dequantize()
+                elif hasattr(x.module, "dequantize"):
+                    W = x.module.dequantize()
+                else:
+                    raise RuntimeError(f"Unsloth: Could not dequantize module {name}")
+            pass
+            
             W = _merge_lora(W, x, name)
             x = W.to(device = 'cpu', dtype = {str(output_dtype)}, non_blocking = True)
         # Remove memory leak

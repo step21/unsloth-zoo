@@ -71,9 +71,18 @@ def get_peft_regex(
     pass
 
     from collections import Counter
-    # Get only linear layers
+    # Get only linear layers or torchao quantized layers
     modules = model.named_modules()
-    linear_modules = [name for name, module in modules if isinstance(module, torch.nn.Linear)]
+    linear_modules = []
+    for name, module in modules:
+        if isinstance(module, torch.nn.Linear):
+            linear_modules.append(name)
+        elif type(module).__module__.startswith("torchao."):
+            # torchao quantized linear layers
+            linear_modules.append(name)
+        elif hasattr(module, "weight") and "torchao" in str(type(module.weight)):
+            linear_modules.append(name)
+    pass
     all_linear_modules = Counter(x.rsplit(".")[-1] for x in linear_modules)
 
     # Isolate lm_head / projection matrices if count == 1

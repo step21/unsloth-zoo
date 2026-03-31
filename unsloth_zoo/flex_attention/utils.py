@@ -36,6 +36,7 @@ __all__ = [
 import torch
 import functools
 from ..temporary_patches.common import torch_compile, _torch_compile
+from ..device_type import DEVICE_TYPE
 FLEX_ATTENTION_KV_INCREMENT = 512
 
 try:
@@ -51,7 +52,14 @@ try:
     # InductorError: RuntimeError: No valid triton configs. OutOfMemoryError: out of resource: triton_tem_fused_0 Required: 65536 Hardware limit:65536 Reducing block sizes or `num_stages` may help.
     # See https://github.com/pytorch/pytorch/issues/133254#issuecomment-2408710459
     # https://github.com/pytorch/pytorch/issues/133254#issuecomment-2539969593
-    vram_of_gpu = min(torch.cuda.memory.mem_get_info(i)[-1]/1024/1024/1024 for i in range(torch.cuda.device_count()))
+    if DEVICE_TYPE == "cuda":
+        vram_of_gpu = min(torch.cuda.memory.mem_get_info(i)[-1]/1024/1024/1024 for i in range(torch.cuda.device_count()))
+    elif DEVICE_TYPE == "xpu":
+        vram_of_gpu = min(torch.xpu.memory.mem_get_info(i)[-1]/1024/1024/1024 for i in range(torch.xpu.device_count()))
+    else:
+        # MPS or others, assume decent VRAM or don't optimize kernel options
+        vram_of_gpu = 32 # Default to > 24GB path to avoid aggressive block size reduction unless needed
+
     kernel_options = None
     if vram_of_gpu <= 16:
         kernel_options = {
@@ -77,23 +85,27 @@ try:
     flex_attention = _torch_compile(_flex_attention)
 
     @functools.lru_cache
-    def create_block_mask_cached(mask_mod, M, N, device = "cuda"):
+    def create_block_mask_cached(mask_mod, M, N, device = None):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
+        if device is None: device = "cuda" if torch.cuda.is_available() else DEVICE_TYPE
         return _create_block_mask(mask_mod, None, None, M, N, device = device)
 
     @functools.lru_cache
-    def create_block_mask(mask_mod, bsz, head, M, N, device = "cuda"):
+    def create_block_mask(mask_mod, bsz, head, M, N, device = None):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
+        if device is None: device = "cuda" if torch.cuda.is_available() else DEVICE_TYPE
         return _create_block_mask(mask_mod, bsz, head, M, N, device = device)
 
-    def compiled_create_block_mask_cached(mask_mod, M, N, device = "cuda"):
+    def compiled_create_block_mask_cached(mask_mod, M, N, device = None):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
+        if device is None: device = "cuda" if torch.cuda.is_available() else DEVICE_TYPE
         # See https://github.com/meta-pytorch/attention-gym/issues/15#issuecomment-2284148665
         # _compile MUST be on to reduce VRAM otherwise O(N^2) usage
         return _create_block_mask(mask_mod, None, None, M, N, device = device, _compile = True)
 
-    def compiled_create_block_mask(mask_mod, bsz, head, M, N, device = "cuda"):
+    def compiled_create_block_mask(mask_mod, bsz, head, M, N, device = None):
         """Create block mask for Flex Attention. Assume bsz=any(None), head=any(None)"""
+        if device is None: device = "cuda" if torch.cuda.is_available() else DEVICE_TYPE
         # _compile MUST be on to reduce VRAM otherwise O(N^2) usage
         return _create_block_mask(mask_mod, bsz, head, M, N, device = device, _compile = True)
 

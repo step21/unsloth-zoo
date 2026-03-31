@@ -21,6 +21,7 @@ import ast
 
 __all__ = [
     "patch_compiling_bitsandbytes",
+    "patch_torchao",
     "patch_layernorm",
     "patch_torch_compile",
     "patch_model_and_tokenizer",
@@ -62,6 +63,23 @@ def patch_compiling_bitsandbytes():
     # bitsandbytes.autograd._functions.matmul_4bit = torch._disable_dynamo(
     #     bitsandbytes.autograd._functions.matmul_4bit
     # )
+    return
+pass
+
+
+def patch_torchao():
+    # All Unsloth Zoo code licensed under LGPLv3
+    # Optimize TorchAO modules for torch.compile
+    try:
+        import torchao
+        if os.environ.get("UNSLOTH_ENABLE_LOGGING", "0") == "1":
+            print(f"Unsloth: Patching torchao v{torchao.__version__}")
+        
+        # TorchAO generally works well with torch.compile, but we can set 
+        # some global configs here if needed for specific backends like MPS.
+        pass
+    except ImportError:
+        pass
     return
 pass
 
